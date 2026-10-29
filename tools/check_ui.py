@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app import Application
+from windows_integration import RestoreHotkey
 
 
 def main():
@@ -33,12 +34,33 @@ def main():
         assert app.five.value.cget("text") == "72%"
         assert app.weekly.value.cget("text") == "47%"
         assert app.tray is not None and app.tray.visible
-        app.hide()
+        app.minimize()
+        root.update_idletasks()
+        assert root.state() == "iconic", root.state()
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32")
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        style = user32.GetWindowLongW(app.hwnd, -20)
+        assert style & 0x00040000, "Taskbar APPWINDOW flag missing"
+        assert not style & 0x00000080, "Taskbar window incorrectly marked TOOLWINDOW"
+        app.show()
+        root.update_idletasks()
+        assert root.state() == "normal"
+        app.hide_to_tray()
         assert root.state() == "withdrawn"
         app.show()
         root.update_idletasks()
         assert root.state() == "normal"
-        print(f"Widget: {w}x{h}; values, tray, hide/show: OK")
+        app.hotkey = RestoreHotkey(lambda: app.actions.put("show"))
+        assert app.hotkey.registered, "Restore hotkey registration failed"
+        app.hide_to_tray()
+        app.hotkey.user32.PostThreadMessageW(app.hotkey.thread_id, 0x0312, 1, 0)
+        root.after(650, check_hotkey)
+
+    def check_hotkey():
+        assert app.root.state() == "normal", "Hotkey did not restore the widget"
+        print("Values, taskbar minimization, tray restoration, global hotkey: OK")
 
     app.root.after(1000, check)
     app.run()

@@ -23,8 +23,10 @@ import winreg
 from PIL import Image, ImageDraw, ImageTk
 import pystray
 
-from browser import ConnectionProblem, EdgeConnection, USAGE_URL
+from codex_client import CodexConnection, USAGE_URL
+from errors import ConnectionProblem
 from usage import Usage, parse_usage
+from windows_integration import RestoreHotkey, taskbar_window
 
 
 APP_NAME = "Codex Usage"
@@ -95,7 +97,7 @@ def save_config(config):
 class SingleInstance:
     """An existing instance receives a request to show its widget."""
 
-    def __init__(self):
+    def __init__(self, request="show"):
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
         self.kernel.CreateMutexW.restype = wintypes.HANDLE
@@ -110,15 +112,17 @@ class SingleInstance:
             raise ctypes.WinError(ctypes.get_last_error())
         self.existing = ctypes.get_last_error() == 183
         self.event = self.kernel.CreateEventW(None, False, False, "Local\\CodexUsage.Show.v1")
-        if not self.event:
+        self.quit_event = self.kernel.CreateEventW(None, False, False, "Local\\CodexUsage.Quit.v1")
+        if not self.event or not self.quit_event:
             raise ctypes.WinError(ctypes.get_last_error())
         if self.existing:
-            self.kernel.SetEvent(self.event)
+            self.kernel.SetEvent(self.quit_event if request == "quit" else self.event)
 
     def requested(self):
         return self.kernel.WaitForSingleObject(self.event, 0) == 0
 
     def close(self):
+        self.kernel.CloseHandle(self.quit_event)
         self.kernel.CloseHandle(self.event)
         self.kernel.CloseHandle(self.mutex)
 
@@ -199,28 +203,32 @@ class Application:
         self.snapshot: Usage | None = None
         self.error = ""
         self.tray = None
+        self.hotkey = None
         self.actions = queue.Queue()
         self.messages = queue.Queue()
         self.stop = threading.Event()
         self.wake = threading.Event()
-        self.connect_requested = threading.Event()
-        self.edge = EdgeConnection(DATA_DIR / "EdgeProfile")
+        self.login_thread = None
+        self.login_pending = False
+        self.login_open = False
+        self.client = CodexConnection(DATA_DIR / "Auth", on_change=self.wake.set)
         self.worker_thread = None
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
         self.root.configure(bg=BG)
-        self.root.overrideredirect(True)
+        self.root.resizable(False, False)
         self.root.attributes("-topmost", self.config["topmost"])
         self.scale = max(1.0, float(self.root.tk.call("tk", "scaling")) / (96 / 72))
         self.icon_image = ImageTk.PhotoImage(make_icon())
         self.root.iconphoto(True, self.icon_image)
         self.build_ui()
         self.position()
-        self.root.protocol("WM_DELETE_WINDOW", self.hide)
-        self.root.bind("<Escape>", lambda _: self.hide())
+        self.root.protocol("WM_DELETE_WINDOW", self.minimize)
+        self.root.bind("<Escape>", lambda _: self.minimize())
         self.root.bind("<Button-3>", self.popup_menu)
         self.root.deiconify()
+        self.hwnd = taskbar_window(self.root)
         self.root.after(100, self.tick)
         if smoke_test:
             now = time.time()
@@ -233,13 +241,14 @@ class Application:
                                          "reset_at": now + 172800},
                 }, "rate_limit_reset_credits": {"available_count": 3},
             })
-            self.root.after(2500, self.quit)
+            self.smoke_after_id = self.root.after(2500, self.quit)
         else:
             self.start_tray()
-            if not self.config["connected"] and not startup:
-                self.connect_requested.set()
+            self.hotkey = RestoreHotkey(lambda: self.actions.put("show"))
             self.worker_thread = threading.Thread(target=self.worker, name="usage-reader", daemon=True)
             self.worker_thread.start()
+            if not self.config["connected"] and not startup:
+                self.connect()
 
     def px(self, n):
         return round(n * self.scale)
@@ -265,7 +274,7 @@ class Application:
             widget.bind("<ButtonPress-1>", self.drag_start)
             widget.bind("<B1-Motion>", self.drag_move)
             widget.bind("<ButtonRelease-1>", self.drag_end)
-        self.button(header, "×", self.hide).pack(side="right")
+        self.button(header, "—", self.minimize).pack(side="right")
         self.button(header, "⋯", self.popup_menu).pack(side="right", padx=(0, self.px(5)))
         body = tk.Frame(outer, bg=BG, padx=self.px(16))
         body.pack(fill="both", expand=True)
@@ -288,7 +297,8 @@ class Application:
         self.updated.pack(anchor="w", pady=(0, self.px(9)))
         controls = tk.Frame(body, bg=BG)
         controls.pack(fill="x", pady=(0, self.px(14)))
-        self.button(controls, "接続 / ログイン", self.connect).pack(side="left")
+        self.login_button = self.button(controls, "接続 / ログイン", self.connect)
+        self.login_button.pack(side="left")
         self.button(controls, "更新", self.refresh).pack(side="right")
         self.button(controls, "使用状況 ↗", lambda: webbrowser.open(USAGE_URL)).pack(
             side="right", padx=self.px(6))
@@ -339,24 +349,56 @@ class Application:
                 self.error = "設定を保存できませんでした"
 
     def show(self):
+        self.remember_position()
         self.root.deiconify()
-        self.root.overrideredirect(True)
+        self.position()
+        self.hwnd = taskbar_window(self.root)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.ShowWindow(self.hwnd, 9)
         self.root.lift()
         self.root.attributes("-topmost", self.config["topmost"])
+        user32.SetForegroundWindow(self.hwnd)
+
+    def remember_position(self):
+        if self.root.state() == "normal":
+            self.config.update(x=self.root.winfo_x(), y=self.root.winfo_y())
+            self.persist()
+
+    def minimize(self):
+        self.remember_position()
+        self.root.iconify()
 
     def hide(self):
-        if self.tray is None:
-            if self.smoke_test:
-                return
-            self.root.overrideredirect(False)
-            self.root.iconify()
-        else:
+        self.minimize()
+
+    def hide_to_tray(self):
+        self.remember_position()
+        if self.tray is not None and self.tray.visible:
             self.root.withdraw()
+        else:
+            self.minimize()
 
     def connect(self):
-        self.status.configure(text="専用のEdge画面でログインしてください", fg=AMBER)
-        self.connect_requested.set()
+        self.login_pending = True
+        self.error = ""
+        self.status.configure(text="通常のブラウザーで公式ログインを開いています…", fg=AMBER)
+        if self.login_thread is None or not self.login_thread.is_alive():
+            self.login_thread = threading.Thread(target=self.open_login, name="login-window", daemon=True)
+            self.login_thread.start()
         self.wake.set()
+
+    def open_login(self):
+        try:
+            self.client.open_login()
+            self.messages.put(("login_open", None))
+        except Exception as exc:
+            logging.warning("Login window failed: %s", type(exc).__name__)
+            message = str(exc) if isinstance(exc, ConnectionProblem) else "ログイン画面を開けませんでした。再度「接続」を押してください"
+            self.messages.put(("login_error", message))
+        finally:
+            self.wake.set()
 
     def refresh(self):
         self.wake.set()
@@ -365,7 +407,6 @@ class Application:
         menu = tk.Menu(self.root, tearoff=False)
         menu.add_command(label="今すぐ更新", command=self.refresh)
         menu.add_command(label="ChatGPTに接続 / 再ログイン", command=self.connect)
-        menu.add_command(label="接続用ブラウザーを隠す", command=lambda: self.actions.put("hide_browser"))
         menu.add_separator()
         self.topmost_var = tk.BooleanVar(value=self.config["topmost"])
         menu.add_checkbutton(label="常に最前面", variable=self.topmost_var, command=self.toggle_topmost)
@@ -379,7 +420,9 @@ class Application:
                                      variable=self.interval_var, command=self.change_interval)
         menu.add_cascade(label="自動更新間隔", menu=interval)
         menu.add_separator()
-        menu.add_command(label="ウィジェットを隠す", command=self.hide)
+        menu.add_command(label="最小化（タスクバーに残す）", command=self.minimize)
+        menu.add_command(label="通知領域に格納", command=self.hide_to_tray)
+        menu.add_command(label="再表示：Ctrl+Alt+U / 起動.cmd", state="disabled")
         menu.add_command(label="終了", command=self.quit)
         x = event.x_root if event else self.root.winfo_pointerx()
         y = event.y_root if event else self.root.winfo_pointery()
@@ -409,7 +452,8 @@ class Application:
             return lambda *_: self.actions.put(name)
         menu = pystray.Menu(
             pystray.MenuItem("ウィジェットを表示", action("show"), default=True),
-            pystray.MenuItem("ウィジェットを隠す", action("hide")),
+            pystray.MenuItem("最小化（タスクバーに残す）", action("minimize")),
+            pystray.MenuItem("通知領域に格納", action("hide_to_tray")),
             pystray.MenuItem("今すぐ更新", action("refresh")),
             pystray.MenuItem("ChatGPTに接続", action("connect")),
             pystray.Menu.SEPARATOR,
@@ -427,45 +471,42 @@ class Application:
         try:
             while not self.stop.is_set():
                 self.wake.clear()
-                visible = self.connect_requested.is_set()
-                self.connect_requested.clear()
                 try:
-                    self.edge.start(visible=visible)
-                    payload, details = self.edge.fetch()
+                    self.client.start()
+                    payload, details = self.client.fetch()
                     snapshot = parse_usage(payload, details)
-                    self.edge.ready()
                     self.messages.put(("usage", snapshot))
                     failures = 0
                     delay = self.config["interval"]
                 except ConnectionProblem as exc:
                     failures += 1
                     self.messages.put(("error", str(exc)))
-                    delay = 15 if exc.needs_login else min(300, 30 * 2 ** min(failures - 1, 4))
+                    delay = 3 if self.client.login_in_progress else 15 if exc.needs_login else min(300, 30 * 2 ** min(failures - 1, 4))
                 except Exception as exc:
                     failures += 1
                     # Do not log browser replies: they can contain account data.
                     logging.warning("Usage read failed: %s", type(exc).__name__)
                     self.messages.put(("error", "接続を再試行しています。「接続」からログインを確認できます"))
-                    delay = min(300, 30 * 2 ** min(failures - 1, 4))
+                    delay = 3 if self.client.login_in_progress else min(300, 30 * 2 ** min(failures - 1, 4))
                 if not self.stop.is_set():
                     self.wake.wait(delay)
         finally:
-            self.edge.close()
+            self.client.close()
 
     def tick(self):
         if self.stop.is_set():
             return
         if self.instance and self.instance.requested():
             self.show()
+        if self.instance and self.instance.kernel.WaitForSingleObject(self.instance.quit_event, 0) == 0:
+            self.quit()
+            return
         while True:
             try:
                 action = self.actions.get_nowait()
             except queue.Empty:
                 break
-            if action == "hide_browser":
-                self.edge.hide()
-            else:
-                getattr(self, action)()
+            getattr(self, action)()
             if self.stop.is_set():
                 return
         while True:
@@ -473,7 +514,14 @@ class Application:
                 kind, value = self.messages.get_nowait()
             except queue.Empty:
                 break
-            if kind == "usage":
+            if kind == "login_open":
+                self.login_pending = False
+                self.login_open = True
+            elif kind == "login_error":
+                self.login_pending = False
+                self.login_open = False
+                self.error = value
+            elif kind == "usage":
                 self.snapshot = value
                 self.error = ""
                 if not self.config["connected"]:
@@ -512,17 +560,22 @@ class Application:
                     self.tray.title = title
         elif self.error:
             self.status.configure(text=self.error, fg=AMBER)
+        if self.login_pending:
+            self.status.configure(text="通常のブラウザーで公式ログインを開いています…", fg=AMBER)
+        elif self.login_open and self.client.login_in_progress:
+            self.status.configure(text="通常のブラウザーでCodexへのログインを完了してください", fg=AMBER)
         self.root.after(500, self.tick)
 
     def quit(self):
         if self.stop.is_set():
             return
-        self.config.update(x=self.root.winfo_x(), y=self.root.winfo_y())
-        self.persist()
+        self.remember_position()
         self.stop.set()
         self.wake.set()
         if self.tray:
             self.tray.stop()
+        if self.hotkey:
+            self.hotkey.close()
         self.root.destroy()
 
     def run(self):
@@ -531,6 +584,8 @@ class Application:
         finally:
             self.stop.set()
             self.wake.set()
+            if self.login_thread:
+                self.login_thread.join(timeout=30)
             if self.worker_thread:
                 self.worker_thread.join(timeout=40)
 
@@ -541,7 +596,11 @@ def install():
     destination = DATA_DIR / "bin" / "CodexUsage.exe"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if Path(sys.executable).resolve() != destination.resolve():
+        runtime = Path(sys.executable).with_name("codex.exe")
+        if not runtime.is_file():
+            raise RuntimeError("Codex公式コンポーネント codex.exe が見つかりません")
         shutil.copy2(sys.executable, destination)
+        shutil.copy2(runtime, destination.with_name("codex.exe"))
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
         command = subprocess.list2cmdline([str(destination), "--startup"])
         winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
@@ -555,6 +614,7 @@ def main():
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--disable-startup", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--quit", action="store_true", help="起動中のアプリに終了を要求する")
     args = parser.parse_args()
     if args.disable_startup:
         set_startup(False)
@@ -571,9 +631,9 @@ def main():
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except (AttributeError, OSError):
         pass
-    instance = None if args.smoke_test else SingleInstance()
+    instance = None if args.smoke_test else SingleInstance("quit" if args.quit else "show")
     try:
-        if instance and instance.existing:
+        if args.quit or (instance and instance.existing):
             return
         Application(instance, args.smoke_test, args.startup).run()
     except Exception:

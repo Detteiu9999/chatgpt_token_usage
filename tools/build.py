@@ -1,6 +1,7 @@
 """Build a standalone, console-free Windows executable."""
 
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -22,6 +23,11 @@ def main():
         "--exclude-module", "pandas", "--exclude-module", "scipy",
         str(ROOT / "app.py"),
     ], cwd=ROOT, check=True)
+    runtime = (ROOT / "runtime/node_modules/@openai/codex-win32-x64/vendor"
+               / "x86_64-pc-windows-msvc/bin/codex.exe")
+    if not runtime.is_file():
+        raise RuntimeError("Run npm install in runtime/ before building")
+    shutil.copy2(runtime, ROOT / "dist/codex.exe")
 
 
 if __name__ == "__main__":

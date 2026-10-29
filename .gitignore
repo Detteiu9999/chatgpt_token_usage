@@ -4,3 +4,4 @@ build/
 dist/
 *.spec
 test-artifacts/
+runtime/node_modules/
