@@ -73,7 +73,7 @@ def set_startup(enabled):
 
 
 def load_config():
-    defaults = {"topmost": True, "interval": 60, "x": None, "y": None, "connected": False}
+    defaults = {"topmost": True, "interval": 60, "x": None, "y": None, "connected": False, "layout": "vertical"}
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -82,6 +82,8 @@ def load_config():
         pass
     if defaults["interval"] not in (30, 60, 120, 300):
         defaults["interval"] = 60
+    if defaults["layout"] not in ("vertical", "horizontal", "horizontal-bottom"):
+        defaults["layout"] = "vertical"
     defaults["topmost"] = defaults["topmost"] is True
     defaults["connected"] = defaults["connected"] is True
     return defaults
@@ -160,20 +162,34 @@ class UsageCard:
     def __init__(self, app, parent, title):
         self.app = app
         self.window = None
+        self.title = title
         self.frame = tk.Frame(parent, bg=PANEL, padx=app.px(15), pady=app.px(12))
-        self.frame.pack(fill="x", pady=(0, app.px(9)))
-        row = tk.Frame(self.frame, bg=PANEL)
-        row.pack(fill="x")
-        app.label(row, title, fg=MUTED, bg=PANEL, size=10).pack(side="left")
-        self.value = app.label(row, "—", bg=PANEL, size=21, bold=True)
-        self.value.pack(side="right")
+        self.row = tk.Frame(self.frame, bg=PANEL)
+        self.title_label = app.label(self.row, title, fg=MUTED, bg=PANEL, size=10)
+        self.value = app.label(self.row, "—", bg=PANEL, size=21, bold=True)
         self.bar = tk.Canvas(self.frame, height=app.px(6), bg=PANEL, highlightthickness=0)
-        self.bar.pack(fill="x", pady=(app.px(8), app.px(9)))
         self.bar.bind("<Configure>", lambda _: self.draw())
         self.info = app.label(self.frame, "使用量：未取得", bg=PANEL, fg=MUTED, size=9)
-        self.info.pack(anchor="w")
         self.reset = app.label(self.frame, "回復時刻：未取得", bg=PANEL, fg=MUTED, size=9)
-        self.reset.pack(anchor="w", pady=(app.px(2), 0))
+
+    def layout_vertical(self):
+        self.frame.pack(fill="x", pady=(0, self.app.px(9)))
+        self.row.pack(fill="x")
+        self.title_label.pack(side="left")
+        self.value.pack(side="right")
+        self.bar.pack(fill="x", pady=(self.app.px(8), self.app.px(9)))
+        self.info.pack(anchor="w")
+        self.reset.pack(anchor="w", pady=(self.app.px(2), 0))
+
+    def layout_horizontal(self, parent, padx):
+        self.frame.configure(padx=self.app.px(10), pady=self.app.px(8))
+        self.frame.pack(side="left", fill="y", expand=True, padx=padx)
+        self.row.pack(fill="x")
+        self.title_label.pack(anchor="w")
+        self.value.pack(anchor="e")
+        self.bar.pack(fill="x", pady=(self.app.px(6), self.app.px(6)))
+        self.info.pack(anchor="w")
+        self.reset.pack(anchor="w")
 
     def draw(self):
         width = self.bar.winfo_width()
@@ -278,6 +294,14 @@ class Application:
         self.button(header, "⋯", self.popup_menu).pack(side="right", padx=(0, self.px(5)))
         body = tk.Frame(outer, bg=BG, padx=self.px(16))
         body.pack(fill="both", expand=True)
+        self._body = body
+        layout = self.config.get("layout", "vertical")
+        if layout == "vertical":
+            self.build_vertical(body)
+        else:
+            self.build_horizontal(body)
+
+    def build_vertical(self, body):
         self.label(body, "利用枠の残量", fg=MUTED, size=9).pack(anchor="w", pady=(0, self.px(8)))
         self.five = UsageCard(self, body, "5時間枠")
         self.weekly = UsageCard(self, body, "1週間枠")
@@ -303,16 +327,57 @@ class Application:
         self.button(controls, "使用状況 ↗", lambda: webbrowser.open(USAGE_URL)).pack(
             side="right", padx=self.px(6))
 
+    def build_horizontal(self, body):
+        self.label(body, "利用枠の残量", fg=MUTED, size=9).pack(anchor="w", pady=(0, self.px(6)))
+        cards = tk.Frame(body, bg=BG)
+        cards.pack(fill="x")
+        self.five = UsageCard(self, cards, "5時間枠")
+        self.five.layout_horizontal(cards, padx=(0, self.px(6)))
+        self.weekly = UsageCard(self, cards, "1週間枠")
+        self.weekly.layout_horizontal(cards, padx=(0, self.px(6)))
+        tickets = tk.Frame(cards, bg=PANEL, padx=self.px(12), pady=self.px(8))
+        tickets.pack(side="left", fill="both", expand=True)
+        ticket_row = tk.Frame(tickets, bg=PANEL)
+        ticket_row.pack(fill="x")
+        self.label(ticket_row, "利用上限のリセット", bg=PANEL, fg=MUTED, size=10).pack(side="left")
+        self.ticket_value = self.label(ticket_row, "—", bg=PANEL, size=18, bold=True)
+        self.ticket_value.pack(side="right")
+        self.expiry = self.label(tickets, "残数：未取得", bg=PANEL, fg=MUTED, size=9)
+        self.expiry.pack(anchor="w", pady=(self.px(4), 0))
+        self.status = self.label(body, "接続を準備しています…", size=9, fg=MUTED,
+                                 wraplength=self.px(420), justify="left", anchor="w", height=1)
+        self.status.pack(fill="x", pady=(self.px(6), self.px(2)))
+        self.updated = self.label(body, "最終取得：—", size=8, fg=MUTED)
+        self.updated.pack(anchor="w", pady=(0, self.px(6)))
+        controls = tk.Frame(body, bg=BG)
+        controls.pack(fill="x", pady=(0, self.px(10)))
+        self.login_button = self.button(controls, "接続 / ログイン", self.connect)
+        self.login_button.pack(side="left")
+        self.button(controls, "更新", self.refresh).pack(side="right")
+        self.button(controls, "使用状況 ↗", lambda: webbrowser.open(USAGE_URL)).pack(
+            side="right", padx=self.px(6))
+
+    def base_width(self):
+        if self.config.get("layout", "vertical") == "vertical":
+            return self.px(354)
+        return self.px(580)
+
     def position(self):
         self.root.update_idletasks()
-        width = self.px(354)
+        width = self.base_width()
         height = self.root.winfo_reqheight()
         user32 = ctypes.windll.user32
         left, top = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
         vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
         x, y = self.config["x"], self.config["y"]
-        if not isinstance(x, int) or not isinstance(y, int):
-            x, y = self.root.winfo_screenwidth() - width - self.px(24), self.px(40)
+        if self.config.get("layout") == "horizontal-bottom":
+            if not isinstance(x, int) or not isinstance(y, int):
+                x = self.root.winfo_screenwidth() - width - self.px(24)
+                y = top + vh - height - self.px(8)
+        else:
+            if not isinstance(x, int) or not isinstance(y, int):
+                x = self.root.winfo_screenwidth() - width - self.px(24)
+                y = self.px(40)
         x = max(left, min(x, left + vw - width))
         y = max(top, min(y, top + vh - height))
         self.root.geometry(f"{width}x{height}")
@@ -419,6 +484,14 @@ class Application:
             interval.add_radiobutton(label=f"{seconds}秒", value=seconds,
                                      variable=self.interval_var, command=self.change_interval)
         menu.add_cascade(label="自動更新間隔", menu=interval)
+        layout = tk.Menu(menu, tearoff=False)
+        self.layout_var = tk.StringVar(value=self.config.get("layout", "vertical"))
+        for key, label in (("vertical", "縦長"),
+                            ("horizontal", "横長（上部表示）"),
+                            ("horizontal-bottom", "横長（下部表示）")):
+            layout.add_radiobutton(label=label, value=key,
+                                   variable=self.layout_var, command=self.change_layout)
+        menu.add_cascade(label="レイアウト", menu=layout)
         menu.add_separator()
         menu.add_command(label="最小化（タスクバーに残す）", command=self.minimize)
         menu.add_command(label="通知領域に格納", command=self.hide_to_tray)
@@ -446,6 +519,14 @@ class Application:
         self.config["interval"] = self.interval_var.get()
         self.persist()
         self.wake.set()
+
+    def change_layout(self):
+        self.config["layout"] = self.layout_var.get()
+        self.persist()
+        for widget in list(self._body.winfo_children()):
+            widget.destroy()
+        self.build_ui()
+        self.position()
 
     def start_tray(self):
         def action(name):
