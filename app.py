@@ -171,6 +171,7 @@ class UsageCard:
         self.bar.bind("<Configure>", lambda _: self.draw())
         self.info = app.label(self.frame, "使用量：未取得", bg=PANEL, fg=MUTED, size=9)
         self.reset = app.label(self.frame, "回復時刻：未取得", bg=PANEL, fg=MUTED, size=9)
+        self.layout_vertical()
 
     def layout_vertical(self):
         self.frame.pack(fill="x", pady=(0, self.app.px(9)))
@@ -288,7 +289,7 @@ class Application:
         if getattr(self, "_outer", None) is not None:
             self._outer.destroy()
         outer = tk.Frame(self.root, bg=BG, highlightbackground="#344055", highlightthickness=1)
-        outer.pack(fill="both", expand=True)
+        outer.pack(fill="both")
         self._outer = outer
         is_horiz = self.config.get("layout", "vertical") != "vertical"
         header = tk.Frame(outer, bg=BG, padx=self.px(16), pady=self.px(4 if is_horiz else 12))
