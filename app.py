@@ -182,13 +182,18 @@ class UsageCard:
         self.reset.pack(anchor="w", pady=(self.app.px(2), 0))
 
     def layout_horizontal(self, parent, padx):
-        self.frame.configure(padx=self.app.px(10), pady=self.app.px(8))
-        self.frame.pack(side="left", fill="y", expand=True, padx=padx)
+        self.frame.configure(padx=self.app.px(8), pady=0)
+        self.frame.pack(side="left", fill="y", padx=padx)
         self.row.pack(fill="x")
-        self.title_label.pack(anchor="w")
-        self.value.pack(anchor="e")
-        self.bar.pack(fill="x", pady=(self.app.px(6), self.app.px(6)))
+        self.title_label.configure(font=("Yu Gothic UI", 8))
+        self.title_label.pack(side="left")
+        self.value.configure(font=("Yu Gothic UI", 14, "bold"))
+        self.value.pack(side="right")
+        self.bar.configure(height=self.app.px(3))
+        self.bar.pack(fill="x", pady=(self.app.px(2), self.app.px(2)))
+        self.info.configure(font=("Yu Gothic UI", 7))
         self.info.pack(anchor="w")
+        self.reset.configure(font=("Yu Gothic UI", 7))
         self.reset.pack(anchor="w")
 
     def draw(self):
@@ -282,7 +287,8 @@ class Application:
     def build_ui(self):
         outer = tk.Frame(self.root, bg=BG, highlightbackground="#344055", highlightthickness=1)
         outer.pack(fill="both", expand=True)
-        header = tk.Frame(outer, bg=BG, padx=self.px(16), pady=self.px(12))
+        is_horiz = self.config.get("layout", "vertical") != "vertical"
+        header = tk.Frame(outer, bg=BG, padx=self.px(16), pady=self.px(4 if is_horiz else 12))
         header.pack(fill="x")
         title = self.label(header, "◉  CODEX USAGE", size=11, bold=True)
         title.pack(side="left")
@@ -328,39 +334,42 @@ class Application:
             side="right", padx=self.px(6))
 
     def build_horizontal(self, body):
-        self.label(body, "利用枠の残量", fg=MUTED, size=9).pack(anchor="w", pady=(0, self.px(6)))
         cards = tk.Frame(body, bg=BG)
         cards.pack(fill="x")
         self.five = UsageCard(self, cards, "5時間枠")
-        self.five.layout_horizontal(cards, padx=(0, self.px(6)))
+        self.five.layout_horizontal(cards, padx=(0, self.px(4)))
         self.weekly = UsageCard(self, cards, "1週間枠")
-        self.weekly.layout_horizontal(cards, padx=(0, self.px(6)))
-        tickets = tk.Frame(cards, bg=PANEL, padx=self.px(12), pady=self.px(8))
-        tickets.pack(side="left", fill="both", expand=True)
+        self.weekly.layout_horizontal(cards, padx=(0, self.px(4)))
+        tickets = tk.Frame(cards, bg=PANEL, padx=self.px(6), pady=0)
+        tickets.pack(side="left", fill="y")
         ticket_row = tk.Frame(tickets, bg=PANEL)
         ticket_row.pack(fill="x")
-        self.label(ticket_row, "利用上限のリセット", bg=PANEL, fg=MUTED, size=10).pack(side="left")
-        self.ticket_value = self.label(ticket_row, "—", bg=PANEL, size=18, bold=True)
+        self.label(ticket_row, "リセット", bg=PANEL, fg=MUTED, size=8).pack(side="left")
+        self.ticket_value = self.label(ticket_row, "—", bg=PANEL, size=14, bold=True)
         self.ticket_value.pack(side="right")
-        self.expiry = self.label(tickets, "残数：未取得", bg=PANEL, fg=MUTED, size=9)
-        self.expiry.pack(anchor="w", pady=(self.px(4), 0))
-        self.status = self.label(body, "接続を準備しています…", size=9, fg=MUTED,
-                                 wraplength=self.px(420), justify="left", anchor="w", height=1)
-        self.status.pack(fill="x", pady=(self.px(6), self.px(2)))
-        self.updated = self.label(body, "最終取得：—", size=8, fg=MUTED)
-        self.updated.pack(anchor="w", pady=(0, self.px(6)))
+        self.expiry = self.label(tickets, "残数：未取得", bg=PANEL, fg=MUTED, size=7)
+        self.expiry.pack(anchor="w")
+        self.status = self.label(body, "接続を準備しています…", size=8, fg=MUTED,
+                                 wraplength=self.px(640), justify="left", anchor="w", height=1)
+        self.status.pack(fill="x", pady=0)
+        self.updated = self.label(body, "最終取得：—", size=7, fg=MUTED)
+        self.updated.pack(anchor="w", pady=0)
         controls = tk.Frame(body, bg=BG)
-        controls.pack(fill="x", pady=(0, self.px(10)))
+        controls.pack(fill="x", pady=0)
         self.login_button = self.button(controls, "接続 / ログイン", self.connect)
+        self.login_button.configure(font=("Yu Gothic UI", 8), padx=self.px(6), pady=0)
         self.login_button.pack(side="left")
-        self.button(controls, "更新", self.refresh).pack(side="right")
-        self.button(controls, "使用状況 ↗", lambda: webbrowser.open(USAGE_URL)).pack(
-            side="right", padx=self.px(6))
+        btn_refresh = self.button(controls, "更新", self.refresh)
+        btn_refresh.configure(font=("Yu Gothic UI", 8), padx=self.px(6), pady=0)
+        btn_refresh.pack(side="right")
+        btn_url = self.button(controls, "使用状況 ↗", lambda: webbrowser.open(USAGE_URL))
+        btn_url.configure(font=("Yu Gothic UI", 8), padx=self.px(6), pady=0)
+        btn_url.pack(side="right", padx=self.px(4))
 
     def base_width(self):
         if self.config.get("layout", "vertical") == "vertical":
             return self.px(354)
-        return self.px(580)
+        return self.px(680)
 
     def position(self):
         self.root.update_idletasks()
