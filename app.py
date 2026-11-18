@@ -285,8 +285,11 @@ class Application:
                          padx=self.px(10), pady=self.px(5), font=("Yu Gothic UI", 9))
 
     def build_ui(self):
+        if getattr(self, "_outer", None) is not None:
+            self._outer.destroy()
         outer = tk.Frame(self.root, bg=BG, highlightbackground="#344055", highlightthickness=1)
         outer.pack(fill="both", expand=True)
+        self._outer = outer
         is_horiz = self.config.get("layout", "vertical") != "vertical"
         header = tk.Frame(outer, bg=BG, padx=self.px(16), pady=self.px(4 if is_horiz else 12))
         header.pack(fill="x")
